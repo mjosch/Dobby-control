@@ -1,0 +1,581 @@
+//acquisition script for dobby 
+//© matthias, sep2019
+//general comments:
+//major change:
+// - updated filter positions (change 16/09/2019)
+// - added feature to set delay after filter wheel change
+
+//remaining things to be implemented
+//- increase laserpower at certain frame 
+//(easy, if statement in i loop, then which laser, grab attribute and change it. or function)
+
+//stuff that needs to go first
+//import collections
+import org.micromanager.api.AcquisitionOptions;
+import java.lang.System;
+import java.util.*;
+
+//custom range function (couldn't get IntStream from Java8 working in here)
+private ArrayList range(start,stop,step) {
+	rangeList = new ArrayList();
+	for (int i = start; i<stop; i+=step) {
+		rangeList.add(i);
+	}
+	return rangeList;
+}
+////////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////USER INPUT BELOW///////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////
+//file name & file directory
+String acqName = "210727_ybbR-LD655-T7RNAP_SORT-LD555-ORC_LS-ATP_T7T-ARS1";
+String rootDirName = "F:/Matthias/MCM pushing/210727_exp2";
+//any comments to save in metadata summary
+String comments = "doubly-tethered MS-V195 derived DNA + preloaded with 5 nM ybbR-LD655-T7RNAP and 0.25 nM SORT-LD555-ORC with ATP"+
+"imaging in 30 mM HEPES, pH 7.6, 50 mM KGlu, 8 mM Mg(OAc)2, 0.05 % Tween20, 0.1 mg/ml BSA, 5 mM DTT, 0.6 mM NTPs, 40 U/ml RNAse inhibitor, 0.21 U/ml PCD, 2.5 mM PCA, 1 mM Trolox";
+
+//Dobby settings
+//used lasers (READ EXPLANATION BELOW)
+//0 -> laser not used, 1 --> laser used first, 2 --> laser used second etc.
+//if two lasers have same value (e.g. 1) they will be turned on together (simultaneous imaging)
+int laserOrder405 = 0;
+int laserOrder488 = 0;
+int laserOrder532 = 1;
+int laserOrder561 = 0;
+int laserOrder637 = 2;
+
+//laser powers (V, values between 0 and 5)
+float laserPower405 = 1;
+float laserPower488 = 1;
+float laserPower532 = 3;
+float laserPower561 = 1;
+float laserPower637 = 3;
+
+//laser exposure times (ms);
+float exposure405 = 200;
+float exposure488 = 200;
+float exposure532 = 200;
+float exposure561 = 200;
+float exposure637 = 200;
+
+//set channel names
+String channelName405 = "cyan";
+String channelName488 = "blue";
+String channelName532 = "LD555-ORC";
+String channelName561 = "yellow";
+String channelName637 = "LD655-T7RNAP";
+
+//camera gain (values between 2 and 1000)
+float gain = 400;
+
+//use autofocus (true/false)?
+boolean useAutofocus = true;
+
+//autofocus frequency (frames) (1 = always)
+int autofocusFrequency = 20;
+
+//delay prior to acquisition start (in s)
+long aquisitionDelay = 0;
+
+//number of x-y positions (position list is generated automatically)
+int nrPositions = 4;
+
+//delay after position change (ms)
+int positionDelay = 500;
+
+//delay after changing Filter Wheel in ms (adjacent 30 ms, opposite 50 ms)
+long wheelDelay = 0;
+
+//number of timepoints
+int nrFrames = 150;
+
+//choice of channels at given timepoints (frame 1 to x)
+//range(int firstFrame, int lastFrame (exclusive), int stepSize) + second interval (optional)
+//note: range(0,0,1) will add nothing - range(0,nrFrames,1) will add every frame
+activeFrames405 = range(0,nrFrames,1);
+activeFrames405_interval2 = range(0,0,1); //optional
+
+activeFrames488 = range(0,nrFrames,1);
+activeFrames488_interval2 = range(0,0,1); //optional
+
+activeFrames532 = range(0,nrFrames,1);
+activeFrames532_interval2 = range(0,0,1); //optional
+
+activeFrames561 = range(0,nrFrames,1);
+activeFrames561_interval2 = range(0,0,1); //optional
+
+activeFrames637 = range(0,nrFrames,1);
+activeFrames637_interval2 = range(0,0,1); //optional
+
+//number of frames per timepoint (minimum 1)
+int avgFrames = 1;
+
+//Want to show this acquisition?
+boolean showAcquisition = true;
+
+//Want to save data during acquisition?
+boolean saveAcquisition = true;
+
+//time between timePoints (in s) - 0 will acquire as fast as possible;
+long intervalS = 5;
+
+////////////////////////////////////////////////////////////////////////////////////////////////
+//////////////////////////////////////END OF USER INPUT/////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////
+
+//----------------------------Do not modify below (also not karl! :D)----------------------------
+
+//clear all previous acquisitions
+gui.closeAllAcquisitions();
+gui.clearMessageWindow();
+
+//set XY Stage Device (now in startup)
+mmc.setXYStageDevice("MCL NanoDrive XY Stage");
+
+//checking proper inputs and catch problems
+//simultaneous imaging - only with 2 channels!
+
+//check if no more than 2 lasers are selected for simultaneous imaging
+//ignore 0
+laserOrders = new int[]{laserOrder405,laserOrder488,laserOrder532,laserOrder561,laserOrder637};
+countMap = new HashMap();
+for (int key : laserOrders) {
+   if (countMap.containsKey(key)) {
+       int occurrence = countMap.get(key);
+       occurrence++;
+       countMap.put(key, occurrence);
+   } 
+   else {
+       countMap.put(key, 1);
+   }
+}
+//more than 2 zeros is not a problem (0 = off)
+countMap.remove(0);
+for (value : countMap.values()) {
+	if (value > 2) {
+		error("Dobby only got Dualsplit. Please adjust laserOrder parameters!");
+		return;
+	}
+}
+
+//autofocus frequency cannot be set to 0 or lower => set to 1
+if (autofocusFrequency < 1) {
+	autofocusFrequenmcy = 1;
+	print("Caught wrong input! Autofocus frequency set to 1 (every cycle).");
+}
+
+//avgFrames cannot be set to 0 or lower => set to 1
+if (avgFrames < 1) {
+	avgFrames = 1;
+	print("Caught wrong input! AvgFrames set to 1 (one per cycle).");
+}
+
+//gain out of range (deal with accidental negative value)
+if (Math.abs(gain) < 2) {
+	gain = 2;
+	print("Gain below range limit - Adjusted to gain = 2");
+}
+else if (Math.abs(gain) > 1000) {
+	gain = 1000;
+	print("Gain above range limit - Adjusted to gain = 1000");
+}
+
+//laser power out of range
+//405 laser
+if (laserPower405 < 0) {
+	print("Caught wrong input! laserPower405 set to 0.");
+	laserPower405 = 0;
+}
+else if (laserPower405 > 5) {
+	print("Caught wrong input! laserPower405 set to 5.");
+	laserPower405 = 5;
+}
+//488 laser
+if (laserPower488 < 0) {
+	print("Caught wrong input! laserPower488 set to 0.");
+	laserPower488 = 0;
+}
+else if (laserPower488 > 5) {
+	print("Caught wrong input! laserPower488 set to 5.");
+	laserPower488 = 5;
+}
+//532 laser
+if (laserPower532 < 0) {
+	print("Caught wrong input! laserPower532 set to 0.");
+	laserPower532 = 0;
+}
+else if (laserPower532 > 5) {
+	print("Caught wrong input! laserPower532 set to 5.");
+	laserPower532 = 5;
+}
+//561 laser
+if (laserPower561 < 0) {
+	print("Caught wrong input! laserPower561 set to 0.");
+	laserPower561 = 0;
+}
+else if (laserPower561 > 5) {
+	print("Caught wrong input! laserPower561 set to 5.");
+	laserPower561 = 5;
+}
+//637 laser
+if (laserPower637 < 0) {
+	print("Caught wrong input! laserPower637 set to 0.");
+	laserPower637 = 0;
+}
+else if (laserPower637 > 5) {
+	print("Caught wrong input! laserPower637 set to 5.");
+	laserPower637 = 5;
+}
+
+//generate position list (using maximum stage range, 200 µm atm)
+Map positionList = new HashMap();
+double posX = 0;
+double posY = 0;
+double xAdd = 0;
+double yAdd = 200;
+if (nrPositions > 2) {
+	xAdd = 200/Math.ceil((double)nrPositions/2 - 1);
+}
+for (int i = 0; i < nrPositions; i++) {
+	positionList.put(i, new double[] {posX, posY});
+	if (i + 1 < Math.ceil((double)nrPositions/2)) {
+		posX += xAdd;
+	}
+	else if (i + 1 == Math.ceil((double)nrPositions/2)) {
+		posY += yAdd;
+	}
+	else if (i + 1 > Math.ceil((double)nrPositions/2)) {
+		posX -= xAdd;
+	}
+}
+
+//Beanshell classes (closures)
+//Filter class
+Map filterMap = new HashMap();
+
+Filter() {
+	String filterName;
+	int wheel1State, wheel2State;
+	
+	init(String filterName, int wheel1State, int wheel2State) {
+		super.filterName = filterName;
+		super.wheel1State = wheel1State;
+		super.wheel2State = wheel2State;
+		global.filterMap.put(super.filterName, new int[] {super.wheel1State, super.wheel2State});
+	}
+	return this;
+}
+
+//generate HashMap of all filters in dobby (contains filter objects)
+
+filterET473_24 = Filter();
+filterET473_24.init("Chroma ET473/24m",5,3);
+
+filterET520_40 = Filter();
+filterET520_40.init("Chroma ET520/40m",5,2);
+
+filterZET405_488_532_642 = Filter();
+filterZET405_488_532_642.init("Chroma ZET405/488/532/642m",5,4);
+
+filterZET488_561 = Filter();
+filterZET488_561.init("Chroma ZET488/561m",2,5);
+
+filterZET488_640 = Filter();
+filterZET488_640.init("Chroma ZET488/640m",3,5);
+
+filterZET532_640 = Filter();
+filterZET532_640.init("Chroma ZET532/640m",5,1);
+
+//Beanshell Laser class
+
+Laser() {
+	String laserName, channelName, laserIntensityName, laserFilter;
+	Color channelColor;
+	ArrayList activeFrames;
+	int laserOrder, digitalIoState;
+	float laserPower, exposure;
+	//TreeSet: ordered Set
+	Set possibleFiltersSet = new TreeSet();
+	//update: combine laserIntensityName and laserPower in HashMap;
+	//fill in later
+	Map laserIntensityPower = new HashMap();
+	init(String laserName, Color channelColor,int laserOrder, ArrayList activeFrames, String channelName, float laserPower, float exposure, int digitalIoState, String laserIntensityName,  String[] possibleFilters) {
+		super.laserName = laserName;
+		super.channelColor = channelColor;
+		super.laserOrder = laserOrder;
+		super.activeFrames = activeFrames;
+		super.channelName = channelName;
+		super.digitalIoState = digitalIoState;
+		super.laserPower = laserPower;
+		super.exposure = exposure;
+		super.laserIntensityName = laserIntensityName;
+		//generate a set of possible filters (used to find common filters in multiple channels)
+		for (filter:possibleFilters) {
+			super.possibleFiltersSet.add(filter);
+		}
+		//set prefered filter for single channel
+		super.laserFilter = possibleFilters[0];
+		
+		//decide here if laser is active and whether channel fusion happens
+		//if spot in array is still 0, no channel fusion takes place
+		if (global.laserSequence.get(super.laserOrder-1) == 0) {
+			//fill in HashMap laserIntensityPower
+			laserIntensityPower.put(laserIntensityName, laserPower);
+			//set replaces value (add will just insert value)
+			global.laserSequence.set(super.laserOrder-1,super.laserName);
+		}
+		
+		//channel merging
+		else {
+			//1)get the laser which is already there and which needs to be fused.
+			addToLaser = laserMap.get(global.laserSequence.get(super.laserOrder-1)).laserName;
+			print(addToLaser);
+
+			//2) update all necessary parameters (fuse name, digitalIO, filter etc.)
+			//actual filter selection (should go first, if fail => stop)
+			//copy possible filters, then make intersection
+			commonFilters = laserMap.get(addToLaser).possibleFiltersSet;
+			commonFilters.retainAll(super.possibleFiltersSet);
+			commonFiltersArray = commonFilters.toArray();
+
+			// no common filter => move second laser to end of laser sequence
+			if (commonFilters.size() == 0) {
+				// just put the whole laser last (array position 5, normally free)
+				super.laserOrder = 5;
+				global.laserSequence.set(super.laserOrder-1,super.laserName);
+			}
+			// common filters found => continue with channel merge
+			else {
+				//common laserFilter
+				super.laserFilter = commonFiltersArray[commonFiltersArray.length-1];
+
+				//lasername
+				super.laserName = addToLaser+"-"+laserName;
+				
+				//channelColor: to make it easier, just take color from second channel (just cosmetic issue);
+				//this is already set above but just to make it easier to read
+				super.channelColor = channelColor;
+				
+				//laserOrder: also stays the same
+				super.laserOrder = laserOrder;
+				
+				//activeFrames: for now, just make union (separate and sim imaging is a bit complicated)
+				super.activeFrames = activeFrames;
+				//loop through all activeFrames of other laser and add them to merged laser frames if unique
+				for (frame:laserMap.get(addToLaser).activeFrames) {
+					if (!super.activeFrames.contains(frame)) {
+						super.activeFrames.add(frame);
+					}
+				}
+				
+				//channelName
+				super.channelName = laserMap.get(addToLaser).channelName+ "&"+channelName;
+	
+				//digitalIO: just get the sum => both lasers will be on
+				super.digitalIoState = laserMap.get(addToLaser).digitalIoState + digitalIoState;
+	
+				//laserIntensityName & laserPower => fill in HashMap => size will be 2
+				//add old laser
+				laserIntensityPower.put(laserMap.get(addToLaser).laserIntensityName, laserMap.get(addToLaser).laserPower);
+				//add new laser
+				laserIntensityPower.put(laserIntensityName, laserPower);
+
+				//exposure: don't change
+				super.exposure = exposure;
+
+				//finally: add to laserSequence
+				global.laserSequence.set(super.laserOrder-1,super.laserName);
+			}
+		}
+	}
+
+	//Method to turn on Laser(s) - this will work for single and double lasers
+	void laserOn() {
+		//figure out if filter change is necessary => current state equals desired state
+		changeFilter = true;
+		if ((Integer.valueOf(mmc.getProperty("Filter wheel 1","State")) == filterMap.get(laserFilter)[0]) && (Integer.valueOf(mmc.getProperty("Filter wheel 2","State")) == filterMap.get(laserFilter)[1])) {
+			changeFilter = false;
+		}
+		mmc.setProperty("Filter wheel 1", "State", filterMap.get(laserFilter)[0]);
+		mmc.setProperty("Filter wheel 2", "State", filterMap.get(laserFilter)[1]);
+		//time to set filter wheels: 30 ms for adjacent pos, 50 ms for opposite pos
+		//so keep track of total time and wait couple of ms if necessary
+		long wheelSetTime = System.currentTimeMillis();
+		print("Setting filter " + laserFilter);
+		mmc.setExposure(exposure);
+		//set laserPower for both channels using earlier created HashMap laserIntensityPower
+		for (entry:laserIntensityPower.entrySet()) {
+			mmc.setProperty(entry.getKey(), "Volts", String.valueOf(entry.getValue()));
+		}
+		//sleep if filter wheels were actually changed
+		if (changeFilter) {
+			gui.sleep(wheelDelay - (System.currentTimeMillis()-wheelSetTime));
+		}
+		mmc.setProperty("DigitalIO", "State", digitalIoState);
+	}
+	return this;
+}
+
+//generate instances of laser if selected
+//lasers HashMap here!
+//note: "best" or prefered filter for each laser has to be at position 0 in array
+//laserMap to map the laser object to the laserName (not sure how to do it differently here)
+Map laserMap = new HashMap();
+// fill with zeros first, remove after all is added
+laserSequence = new ArrayList(Collections.nCopies(5,0));
+
+if (laserOrder405>0) {
+	activeFrames405.addAll(activeFrames405_interval2);
+	laser405 = Laser();
+	laser405.init("405", Color.CYAN, laserOrder405, activeFrames405, channelName405, laserPower405, exposure405, 32, "Intensity405", new String[]{filterET473_24.filterName, filterZET405_488_532_642.filterName});
+	laserMap.put(laser405.laserName, laser405);
+}
+if (laserOrder488>0) {
+	activeFrames488.addAll(activeFrames488_interval2);
+	laser488 = Laser();
+	laser488.init("488", Color.BLUE, laserOrder488, activeFrames488, channelName488, laserPower488, exposure488, 16, "Intensity488", new String[]{filterET520_40.filterName, filterZET488_640.filterName, filterZET488_561.filterName, filterZET405_488_532_642.filterName});
+	laserMap.put(laser488.laserName, laser488);
+}
+if (laserOrder532>0) {
+	activeFrames532.addAll(activeFrames532_interval2);
+	laser532 = Laser();
+	laser532.init("532", Color.GREEN, laserOrder532, activeFrames532, channelName532, laserPower532, exposure532, 8, "Intensity532", new String[]{filterZET532_640.filterName, filterZET405_488_532_642.filterName});
+	laserMap.put(laser532.laserName, laser532);
+}
+if (laserOrder561>0) {
+	activeFrames561.addAll(activeFrames561_interval2);
+	laser561 = Laser();
+	laser561.init("561", Color.YELLOW, laserOrder561, activeFrames561, channelName561, laserPower561, exposure561, 4, "Intensity561", new String[]{filterZET488_561.filterName});
+	laserMap.put(laser561.laserName, laser561);
+}
+if (laserOrder637>0) {
+	activeFrames637.addAll(activeFrames637_interval2);
+	laser637 = Laser();
+	laser637.init("637", Color.RED, laserOrder637, activeFrames637, channelName637, laserPower637, exposure637, 2, "Intensity637", new String[]{filterZET532_640.filterName, filterZET488_640.filterName, filterZET405_488_532_642.filterName});
+	laserMap.put(laser637.laserName, laser637);
+}
+//remove remaining zeros from laserSequence => remove "gaps" from bad input
+laserSequence.removeAll(Collections.singleton(0));
+
+//methods
+//method for autofocus
+void autoFocus() {
+	af = gui.getAutofocus();
+	//beam block for camera
+	mmc.setProperty("Filter wheel 1", "State", 5);
+	mmc.setProperty("Filter wheel 2", "State", 0);
+	//turn on IR
+	mmc.setProperty("DigitalIO","State", 1);
+	af.fullFocus();
+	mmc.setProperty("DigitalIO","State", 0);
+}
+
+//turn off laser
+void laserOff() {
+	mmc.setProperty("DigitalIO", "State", 0);
+}
+
+//ACTUAL IMAGING PART
+//set acquisition delay (e.g. incubation time until protein arrival etc.)
+gui.sleep(aquisitionDelay*1000);
+
+//create new acquisition; below see the general syntax
+//syntax:gui.openAcquisition(String acqName, String rootDirName, int nrFrames, int nrChannels, int nrSlices, int nrPositions, boolean show, boolean save);
+gui.openAcquisition(acqName, rootDirName, nrFrames, laserSequence.size(), avgFrames, nrPositions, showAcquisition, saveAcquisition);
+//acquisition property
+//gui.setAcquisitionProperty(java.lang.String acqName, java.lang.String propertyName, java.lang.String value)
+gui.setAcquisitionProperty(acqName, "Comments", comments);
+
+//assign channel names in acquisition
+for (int i = 0; i < laserSequence.size(); i++)	{
+	gui.setChannelName(acqName, i, laserMap.get(laserSequence.get(i)).channelName);
+}
+
+//array to store corresponding z-positions for each FOV ("z-position memory")
+double [] zPositions = new double [nrPositions];
+//optional: just to keep track when script started, but also in metadata
+long startTime = System.currentTimeMillis();
+
+//IMAGING LOOPS - where the magic happens
+//FIRST LOOP i => number of cycles (timepoints, switches between FOV..)
+for (int i = 0; i < nrFrames; i++) {
+
+	//start time of current cycle (required for interval time)
+	long now = System.currentTimeMillis();
+	
+	//have to set channel color after first frame is aquired due to bug in Micromanager
+	if (i == 1) {
+		for (int m = 0; m < laserSequence.size(); m++) {
+	gui.setChannelColor(acqName, m, laserMap.get(laserSequence.get(m)).channelColor);
+		}
+	}
+	
+	//SECOND LOOP j => looping between given positions
+	for (int j = 0; j < nrPositions; j++) {
+		
+		//move to given j-position (FOV) & options to set correct z-position
+		gui.setXYStagePosition(positionList.get(j)[0], positionList.get(j)[1]);
+
+		//executes only if autofocus is turned on
+		if (useAutofocus) {
+			//exception for first cycle: autofocus required (z-position list empty)
+			//note that modulo would have 0 as result
+			if (i == 0) {
+				gui.sleep(positionDelay);
+				autoFocus();
+				//store resulting z-position from autoFocus()
+				zPositions[j] = mmc.getPosition(mmc.getFocusDevice());
+			}
+			//use previous z-position as starting point for autofocus (better performance, higher speed)
+			//only executes if i != 0
+			else if (i % autofocusFrequency == 0) {
+				mmc.setPosition(mmc.getFocusDevice(), zPositions[j]);
+				gui.sleep(positionDelay);
+				autoFocus();
+				//store resulting z-position from autoFocus() (overwrite old z-position)
+				zPositions[j] = mmc.getPosition(mmc.getFocusDevice());
+			}
+			//no Autofocus, take stored Z-Position for given FOV
+			else {
+				mmc.setPosition(mmc.getFocusDevice(), zPositions[j]);
+				print("No autofocus! Set to z-Position to " + mmc.getPosition(mmc.getFocusDevice()) + " based on saved z-Position "+ zPositions[j]);
+				gui.sleep(positionDelay);
+			}
+		}
+		else {
+			print("Autofocus turned off! Remaining at z-Position " + mmc.getPosition(mmc.getFocusDevice()));
+			gui.sleep(positionDelay);
+		}
+	
+		//THIRD LOOP => frames per cycle
+		for (int k = 0; k < avgFrames; k++) {
+
+			//FOURTH loop => switching between channels
+			for (int l = 0; l < laserSequence.size(); l++) {
+				//frames are only captured for channel if i is within the activeFrames
+				if (laserMap.get(laserSequence.get(l)).activeFrames.contains(i)) {
+					gui.message("Acquiring cycle/timepoint " + i + ", position " + j + ", " + laserMap.get(laserSequence.get(l)).channelName + ", frame " + k +".");
+					mmc.setProperty("Andor", "Gain", String.valueOf(gain));
+					laserMap.get(laserSequence.get(l)).laserOn();
+					gui.snapAndAddImage(acqName, i, l, k, j);
+					
+					//Image property
+					
+					//gui.setImageProperty(acqName, i, l, k, "Reaction going on for (min) ", String.valueOf((System.currentTimeMillis() - startTime)/60000));
+					laserOff();
+				}
+			}
+		}
+		//set channel contrast based on first frame
+		if (i == 0) {
+			gui.setContrastBasedOnFrame(acqName, i, 0);
+		}
+	}
+	long acquisitionTime = System.currentTimeMillis() - now;
+	gui.sleep(intervalS*1000 - acquisitionTime);
+}
+//shutdown
+mmc.setPosition(mmc.getFocusDevice(), zPositions[0]);
+mmc.setProperty("DigitalIO","State", 0);
+mmc.setProperty("Filter wheel 1", "State", 5);
+mmc.setProperty("Filter wheel 2", "State", 0);
+print("Acquisition complete!");
